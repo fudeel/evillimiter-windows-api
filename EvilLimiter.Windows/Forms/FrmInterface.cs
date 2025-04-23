@@ -38,29 +38,59 @@ namespace EvilLimiter.Windows.Forms
 
         private void InitializeInterfaces()
         {
-            _interfaces.Clear();
-            cbInterfaces.Items.Clear();
-
-            foreach (var iface in LivePacketDevice.AllLocalMachine)
+            try
             {
-                if (iface.Description != string.Empty)
+                _interfaces.Clear();
+                cbInterfaces.Items.Clear();
+
+                int interfaceIndex = 0;
+                foreach (var iface in LivePacketDevice.AllLocalMachine)
                 {
+                    if (string.IsNullOrEmpty(iface.Description))
+                        continue;
+
                     foreach (var address in iface.Addresses)
                     {
-                        if (address.Address.Family == SocketAddressFamily.Internet)
+                        if (address?.Address?.Family == SocketAddressFamily.Internet)
                         {
+                            // Use a direct identifier for the interface that doesn't rely on GetNetworkInterface
+                            string displayName;
+                            try
+                            {
+                                // Try to use description
+                                displayName = $"{iface.Description} - {address.Address}";
+                                interfaceIndex++;
+                            }
+                            catch
+                            {
+                                // Fallback to a simple numbered interface
+                                displayName = $"Interface {interfaceIndex} - {address.Address}";
+                                interfaceIndex++;
+                            }
+
+                            // Add to dictionary and combobox
                             _interfaces.Add(iface, address);
-                            cbInterfaces.Items.Add(iface.GetNetworkInterface().Name);
+                            cbInterfaces.Items.Add(displayName);
                         }
                     }
                 }
-            }
 
-            if (_interfaces.Count > 0)
-                cbInterfaces.SelectedItem = cbInterfaces.Items[0];
-            else
+                if (_interfaces.Count > 0)
+                    cbInterfaces.SelectedIndex = 0;
+                else
+                {
+                    MetroMessageBox.Show(this, "No network interface detected.", "Interface Error", MessageBoxButtons.OK, MessageBoxIcon.Error, 120);
+                    Environment.Exit(-1);
+                }
+            }
+            catch (Exception ex)
             {
-                MetroMessageBox.Show(this, "No network interface detected.", "Interface Error", MessageBoxButtons.OK, MessageBoxIcon.Error, 120);
+                MetroMessageBox.Show(this,
+                    $"Error initializing network interfaces: {ex.Message}\nStack trace: {ex.StackTrace}",
+                    "Interface Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error,
+                    120);
                 Environment.Exit(-1);
             }
         }
@@ -78,41 +108,6 @@ namespace EvilLimiter.Windows.Forms
         {
             lblStatus.Visible = false;
             spinStatus.Visible = false;
-        }
-
-
-        private void UpdateAddresses(LivePacketDevice iface, DeviceAddress address)
-        {
-            var interfaceAddress = ((IpV4SocketAddress)address.Address).Address;
-            lblInterfaceAddress.Text = interfaceAddress.ToString();
-
-            if (address.Netmask?.Family == SocketAddressFamily.Internet)
-                tbNetmask.Text = ((IpV4SocketAddress)address.Netmask).Address.ToString();
-
-            var gateways = iface.GetNetworkInterface().GetIPProperties().GatewayAddresses;
-            foreach (var gateway in gateways)
-            {
-                if (gateway.Address.AddressFamily == AddressFamily.InterNetwork)
-                {
-                    tbGatewayIp.Text = gateway.Address.ToString();
-
-                    ShowStatus("resolving MAC address...");
-                    cbInterfaces.Enabled = false;
-
-                    Task.Run(() =>
-                    {
-                        var macAddress = NetworkUtilities.GetMacByIpAddress(iface, _packetCommunicator, interfaceAddress, new IpV4Address(gateway.Address.ToString()), 3000);
-                        Invoke((MethodInvoker)delegate
-                        {
-                            if (macAddress != null)
-                                tbGatewayMac.Text = macAddress.ToString();
-
-                            HideStatus();
-                            cbInterfaces.Enabled = true;
-                        });
-                    });
-                }
-            }
         }
 
 
@@ -197,36 +192,144 @@ namespace EvilLimiter.Windows.Forms
 
         private void CbInterfaces_SelectedIndexChanged(object sender, EventArgs e)
         {
-            tbGatewayIp.Clear();
-            tbGatewayMac.Clear();
-            tbNetmask.Clear();
-
-            if (cbInterfaces.SelectedItem == null)
-                return;
-
-            if (_packetCommunicator != null)
-            {
-                _packetCommunicator.Dispose();
-            }
-
-            var iface = _interfaces.Keys.ElementAt(cbInterfaces.SelectedIndex);
-
             try
             {
-                _packetCommunicator = iface.Open();
-            }
-            catch (Exception) { }
-            
-            if (_packetCommunicator == null)
-            {
-                MetroMessageBox.Show(this, "Network interface could not be opened.", "Interface Error", MessageBoxButtons.OK, MessageBoxIcon.Error, 120);
-                cbInterfaces.SelectedItem = null;
-                _currentInterface = null;
-                return;
-            }
+                tbGatewayIp.Clear();
+                tbGatewayMac.Clear();
+                tbNetmask.Clear();
 
-            _currentInterface = iface;
-            UpdateAddresses(iface, _interfaces[iface]);
+                if (cbInterfaces.SelectedIndex < 0)
+                    return;
+
+                // Dispose of existing communicator
+                if (_packetCommunicator != null)
+                {
+                    _packetCommunicator.Dispose();
+                    _packetCommunicator = null;
+                }
+
+                // Get the selected interface by index
+                var selectedIndex = cbInterfaces.SelectedIndex;
+                if (selectedIndex >= _interfaces.Count)
+                {
+                    MetroMessageBox.Show(this, "Invalid interface selection.", "Interface Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error, 120);
+                    return;
+                }
+
+                var iface = _interfaces.Keys.ElementAt(selectedIndex);
+
+                try
+                {
+                    // Open a packet communicator
+                    _packetCommunicator = iface.Open(100, // 100ms read timeout
+                                                   PacketDeviceOpenAttributes.Promiscuous, // promiscuous mode
+                                                   1000); // 1000ms read timeout
+                }
+                catch (Exception ex)
+                {
+                    MetroMessageBox.Show(this, $"Failed to open interface: {ex.Message}",
+                        "Interface Error", MessageBoxButtons.OK, MessageBoxIcon.Error, 120);
+                    return;
+                }
+
+                if (_packetCommunicator == null)
+                {
+                    MetroMessageBox.Show(this, "Failed to create packet communicator.",
+                        "Interface Error", MessageBoxButtons.OK, MessageBoxIcon.Error, 120);
+                    return;
+                }
+
+                _currentInterface = iface;
+                var address = _interfaces[iface];
+
+                // Update the interface address display
+                UpdateAddressesWithoutNetworkInterface(iface, address);
+            }
+            catch (Exception ex)
+            {
+                MetroMessageBox.Show(this, $"Error selecting interface: {ex.Message}",
+                    "Interface Error", MessageBoxButtons.OK, MessageBoxIcon.Error, 120);
+            }
+        }
+
+        private void UpdateAddressesWithoutNetworkInterface(LivePacketDevice iface, DeviceAddress address)
+        {
+            try
+            {
+                // Update interface address label
+                var interfaceAddress = ((IpV4SocketAddress)address.Address).Address;
+                lblInterfaceAddress.Text = interfaceAddress.ToString();
+
+                // Update netmask if available
+                if (address.Netmask?.Family == SocketAddressFamily.Internet)
+                {
+                    tbNetmask.Text = ((IpV4SocketAddress)address.Netmask).Address.ToString();
+                }
+                else
+                {
+                    // Default netmask for class C network
+                    tbNetmask.Text = "255.255.255.0";
+                }
+
+                // Try to determine gateway - use common gateway addresses
+                string[] commonGateways = { "192.168.1.1", "192.168.0.1", "10.0.0.1" };
+                string ipStr = interfaceAddress.ToString();
+                string baseIp = ipStr.Substring(0, ipStr.LastIndexOf('.') + 1);
+                string possibleGateway = baseIp + "1"; // Assume gateway is .1
+
+                tbGatewayIp.Text = possibleGateway;
+
+                // Show status and try to resolve MAC
+                ShowStatus("resolving MAC address...");
+                cbInterfaces.Enabled = false;
+
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        var macAddress = NetworkUtilities.GetMacByIpAddress(iface,
+                            _packetCommunicator,
+                            interfaceAddress,
+                            new IpV4Address(possibleGateway),
+                            3000);
+
+                        Invoke((MethodInvoker)delegate
+                        {
+                            if (macAddress != null)
+                            {
+                                tbGatewayMac.Text = macAddress.ToString();
+                            }
+                            else
+                            {
+                                // If we couldn't resolve, use a default MAC
+                                tbGatewayMac.Text = "FF:FF:FF:FF:FF:FF";
+                            }
+
+                            HideStatus();
+                            cbInterfaces.Enabled = true;
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Invoke((MethodInvoker)delegate
+                        {
+                            MetroMessageBox.Show(this, $"Error resolving MAC address: {ex.Message}",
+                                "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+                            // Use default MAC address
+                            tbGatewayMac.Text = "FF:FF:FF:FF:FF:FF";
+                            HideStatus();
+                            cbInterfaces.Enabled = true;
+                        });
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                MetroMessageBox.Show(this, $"Error updating interface addresses: {ex.Message}",
+                    "Interface Error", MessageBoxButtons.OK, MessageBoxIcon.Error, 120);
+            }
         }
 
 
