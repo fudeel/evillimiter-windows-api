@@ -9,55 +9,28 @@ namespace EvilLimiter.Windows
     static class Program
     {
         [STAThread]
-        static void Main(string[] args)
+        static void Main()
         {
             try
             {
-                Common.Config.Read();
+                Config.Read();
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
 
-                // Check if Npcap is installed
-                if (PcapDotNet.Core.LivePacketDevice.AllLocalMachine == null ||
-                    PcapDotNet.Core.LivePacketDevice.AllLocalMachine.Count == 0)
+                // Check for Npcap installation
+                if (LivePacketDevice.AllLocalMachine == null || LivePacketDevice.AllLocalMachine.Count == 0)
                 {
-                    Console.WriteLine("Error: No packet capture devices found. Please ensure Npcap is installed correctly.");
+                    MessageBox.Show("No packet capture devices found. Please ensure Npcap is installed correctly.",
+                        "Missing Dependency", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
 
-                // Check if API mode is requested
-                bool apiMode = args.Length > 0 && (args[0] == "--api" || args[0] == "-a");
-
-                if (apiMode)
-                {
-                    // Start the HTTP server
-                    Console.WriteLine("Starting EvilLimiter in API mode...");
-                    var server = new HttpServer();
-                    server.Start();
-
-                    Console.WriteLine("Press any key to exit...");
-                    Console.ReadKey();
-
-                    server.Stop();
-                }
-                else
-                {
-                    // Start the GUI
-                    Application.EnableVisualStyles();
-                    Application.SetCompatibleTextRenderingDefault(false);
-                    Application.Run(new Forms.FrmInterface());
-                }
+                Application.Run(new FrmInterface());
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error starting application: {ex.Message}");
-                if (args.Length > 0 && (args[0] == "--api" || args[0] == "-a"))
-                {
-                    Console.WriteLine(ex.StackTrace);
-                }
-                else
-                {
-                    MessageBox.Show($"Error starting application: {ex.Message}",
-                        "Application Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
+                MessageBox.Show($"Error starting application: {ex.Message}\n\nStack Trace: {ex.StackTrace}",
+                    "Application Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
     }
