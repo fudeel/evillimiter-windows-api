@@ -270,12 +270,12 @@ namespace EvilLimiter.Windows.API
 
                 // Parse units
                 BitByteUnit uploadUnitEnum = string.IsNullOrEmpty(uploadUnit) ?
-                    BitByteUnit.KBit : (BitByteUnit)Enum.Parse(typeof(BitByteUnit), uploadUnit);
+                    BitByteUnit.KBit : (BitByteUnit)Enum.Parse(typeof(BitByteUnit), uploadUnit, true);
                 BitByteUnit downloadUnitEnum = string.IsNullOrEmpty(downloadUnit) ?
-                    BitByteUnit.KBit : (BitByteUnit)Enum.Parse(typeof(BitByteUnit), downloadUnit);
+                    BitByteUnit.KBit : (BitByteUnit)Enum.Parse(typeof(BitByteUnit), downloadUnit, true);
 
-                // Create limit rule
-                var rule = new LimitRule();
+                // Create limit rule exactly like the GUI does
+                var rule = LimitRule.Free;
 
                 if (uploadRate.HasValue)
                 {
@@ -295,15 +295,12 @@ namespace EvilLimiter.Windows.API
                     }
                 }
 
-                // Remove existing limits first
-                _hostLimiter.Remove(host);
-                _hostSpoofer.Remove(host);
-                Thread.Sleep(100);
-
-                // Apply the limit exactly like GUI
-                _hostSpoofer.Add(host);
-                Thread.Sleep(100); // Small delay between operations
-                _hostLimiter.Add(host, rule);
+                // Apply the limit exactly like the GUI does
+                if (host.LimitRule != rule)
+                {
+                    _hostSpoofer.Add(host);
+                    _hostLimiter.Add(host, rule);
+                }
 
                 Console.WriteLine($"Applied limits to {ipAddress}:");
                 Console.WriteLine($"  Upload: {NetworkUtilities.FancyBitRate(rule.UploadRate)} (burst: {NetworkUtilities.FancyBitRate(rule.UploadBurst)})");
@@ -314,6 +311,7 @@ namespace EvilLimiter.Windows.API
             catch (Exception ex)
             {
                 Console.WriteLine($"Error limiting host: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
                 return false;
             }
         }
