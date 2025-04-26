@@ -43,7 +43,7 @@ namespace EvilLimiter.Windows.API
             Console.WriteLine($"API Server started on port {_port}");
             Console.WriteLine("Available endpoints:");
             Console.WriteLine("GET  /api/interfaces - List all network interfaces");
-            Console.WriteLine("POST /api/scan - Scan hosts on selected interface");
+            Console.WriteLine("POST /api/scan - Select interface and scan hosts");
             Console.WriteLine("POST /api/block - Block a host");
             Console.WriteLine("POST /api/unblock - Unblock a host");
 
@@ -150,7 +150,6 @@ namespace EvilLimiter.Windows.API
                             ipAddress = ipv4Address.ToString(),
                             netmask = netmask,
                             type = iface.Attributes.ToString()
-                            // Removed the 'flags' property as it doesn't exist
                         });
                     }
                 }
@@ -172,7 +171,7 @@ namespace EvilLimiter.Windows.API
                 }
 
                 int interfaceId = Convert.ToInt32(requestData["interfaceId"]);
-                Console.WriteLine($"Scanning interface ID: {interfaceId}");
+                Console.WriteLine($"Selecting and scanning interface ID: {interfaceId}");
 
                 // Get the selected interface
                 var interfaces = LivePacketDevice.AllLocalMachine.ToList();
@@ -214,9 +213,9 @@ namespace EvilLimiter.Windows.API
                 var networkInfo = _networkManager.InitializeNetworkInterface(selectedInterface, selectedAddress);
                 Console.WriteLine($"Network initialized. Gateway: {networkInfo.GatewayIp}, Subnet range count: {networkInfo.SubnetRange.Count}");
 
-                // Start scanning
-                Console.WriteLine("Starting scan...");
-                var scanResults = _networkManager.ScanHosts(networkInfo);
+                // Start aggressive scanning
+                Console.WriteLine("Starting aggressive scan...");
+                var scanResults = _networkManager.ScanHosts();
                 Console.WriteLine($"Scan completed. Found {scanResults.Count} hosts");
 
                 // Convert results to response format
@@ -228,7 +227,17 @@ namespace EvilLimiter.Windows.API
                     status = host.Status.ToString()
                 }).ToList();
 
-                SendResponse(context, 200, new { hosts });
+                SendResponse(context, 200, new
+                {
+                    hosts,
+                    interfaceInfo = new
+                    {
+                        ipAddress = ((IpV4SocketAddress)selectedAddress.Address).Address.ToString(),
+                        gatewayIp = networkInfo.GatewayIp.ToString(),
+                        gatewayMac = networkInfo.GatewayMac.ToString(),
+                        netmask = networkInfo.Netmask.ToString()
+                    }
+                });
             }
             catch (Exception ex)
             {
@@ -251,13 +260,17 @@ namespace EvilLimiter.Windows.API
             string ipAddress = requestData["ipAddress"].ToString();
             string macAddress = requestData["macAddress"].ToString();
 
-            // Create a host object
-            var host = new Host(new IpV4Address(ipAddress), new MacAddress(macAddress));
+            Console.WriteLine($"Attempting to block host: {ipAddress} ({macAddress})");
 
             // Block the host
-            bool success = _networkManager.BlockHost(host);
+            bool success = _networkManager.BlockHost(ipAddress, macAddress);
 
-            SendResponse(context, 200, new { success });
+            if (success)
+            {
+                Console.WriteLine($"Successfully blocked host: {ipAddress}");
+            }
+
+            SendResponse(context, 200, new { success, ipAddress, macAddress });
         }
 
         private void HandleUnblockHost(HttpListenerContext context)
@@ -273,13 +286,17 @@ namespace EvilLimiter.Windows.API
             string ipAddress = requestData["ipAddress"].ToString();
             string macAddress = requestData["macAddress"].ToString();
 
-            // Create a host object
-            var host = new Host(new IpV4Address(ipAddress), new MacAddress(macAddress));
+            Console.WriteLine($"Attempting to unblock host: {ipAddress} ({macAddress})");
 
             // Unblock the host
-            bool success = _networkManager.UnblockHost(host);
+            bool success = _networkManager.UnblockHost(ipAddress, macAddress);
 
-            SendResponse(context, 200, new { success });
+            if (success)
+            {
+                Console.WriteLine($"Successfully unblocked host: {ipAddress}");
+            }
+
+            SendResponse(context, 200, new { success, ipAddress, macAddress });
         }
 
         private Dictionary<string, object> ReadRequestBody(HttpListenerContext context)

@@ -1,11 +1,9 @@
-﻿// API/NetworkManager.cs
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading;
-using System.Threading.Tasks;
 using EvilLimiter.Windows.Data;
 using EvilLimiter.Windows.Networking;
 using EvilLimiter.Windows.Utilities;
@@ -22,20 +20,36 @@ namespace EvilLimiter.Windows.API
         private NetworkInformation _currentNetworkInfo;
         private HostSpoofer _hostSpoofer;
         private HostLimiter _hostLimiter;
-        private HostScanner _hostScanner;
+        private bool _isInitialized = false;
+        private readonly Dictionary<string, Host> _knownHosts = new Dictionary<string, Host>();
+        private AggressiveHostScanner _currentScanner;
+        private readonly object _scannerLock = new object();
 
         public NetworkManager()
         {
         }
 
+        public bool IsInitialized => _isInitialized;
+
         public NetworkInformation InitializeNetworkInterface(LivePacketDevice device, DeviceAddress address)
         {
+            // First, stop any ongoing scanning
+            lock (_scannerLock)
+            {
+                if (_currentScanner != null && _currentScanner.IsScanning)
+                {
+                    _currentScanner.Cancel();
+                    Thread.Sleep(1000); // Give time for the scan to stop
+                }
+            }
+
+            // Then dispose current resources
             if (_currentNetworkInfo != null)
             {
                 Dispose();
             }
 
-            // Create packet communicator
+            // Create new packet communicator
             var communicator = device.Open(100, PacketDeviceOpenAttributes.Promiscuous, 1000);
 
             // Get interface information
@@ -90,35 +104,59 @@ namespace EvilLimiter.Windows.API
             _hostLimiter = new HostLimiter(_currentNetworkInfo);
             _hostLimiter.Start();
 
+            _isInitialized = true;
             return _currentNetworkInfo;
         }
 
-        public List<Host> ScanHosts(NetworkInformation networkInfo)
+        public List<Host> ScanHosts()
         {
+            if (!_isInitialized)
+            {
+                throw new InvalidOperationException("Network interface not initialized. Call InitializeNetworkInterface first.");
+            }
+
+            // Cancel any existing scan
+            lock (_scannerLock)
+            {
+                if (_currentScanner != null && _currentScanner.IsScanning)
+                {
+                    _currentScanner.Cancel();
+                    Thread.Sleep(1000); // Give time for the previous scan to stop
+                }
+            }
+
             var hosts = new List<Host>();
             var scanCompleted = new ManualResetEvent(false);
 
-            // Create a new scanner for each scan
-            var scanner = new HostScanner(networkInfo);
+            // Create a new scanner
+            lock (_scannerLock)
+            {
+                _currentScanner = new AggressiveHostScanner(_currentNetworkInfo);
+            }
 
-            scanner.ScanFinished += (sender, e) =>
+            _currentScanner.ScanFinished += (sender, e) =>
             {
                 if (e.Hosts != null)
                 {
                     hosts.AddRange(e.Hosts);
+                    foreach (var host in e.Hosts)
+                    {
+                        string key = $"{host.IpAddress}_{host.MacAddress}";
+                        _knownHosts[key] = host;
+                    }
                 }
                 scanCompleted.Set();
             };
 
             // Start scanning
-            scanner.Scan(networkInfo.SubnetRange);
+            _currentScanner.Scan(_currentNetworkInfo.SubnetRange);
 
             // Wait for scan to complete
-            bool completed = scanCompleted.WaitOne(65000); // 60 seconds timeout
+            bool completed = scanCompleted.WaitOne(90000); // 90 seconds timeout
 
             if (!completed)
             {
-                Console.WriteLine("Scan timed out after 30 seconds");
+                Console.WriteLine("Scan timed out after 90 seconds");
             }
             else
             {
@@ -128,18 +166,29 @@ namespace EvilLimiter.Windows.API
             return hosts;
         }
 
-        public bool BlockHost(Host host)
+        public bool BlockHost(string ipAddress, string macAddress)
         {
             try
             {
-                if (_hostSpoofer == null || _hostLimiter == null)
+                if (!_isInitialized)
                 {
-                    throw new InvalidOperationException("Network components not initialized");
+                    throw new InvalidOperationException("Network interface not initialized");
+                }
+
+                // Create a host object
+                var host = new Host(new IpV4Address(ipAddress), new MacAddress(macAddress));
+
+                // Check if host exists in known hosts
+                string key = $"{ipAddress}_{macAddress}";
+                if (_knownHosts.ContainsKey(key))
+                {
+                    host = _knownHosts[key];
                 }
 
                 // Add to spoofer and limiter to block the host
                 _hostSpoofer.Add(host);
                 _hostLimiter.Add(host, LimitRule.Block);
+
                 return true;
             }
             catch (Exception ex)
@@ -149,18 +198,29 @@ namespace EvilLimiter.Windows.API
             }
         }
 
-        public bool UnblockHost(Host host)
+        public bool UnblockHost(string ipAddress, string macAddress)
         {
             try
             {
-                if (_hostSpoofer == null || _hostLimiter == null)
+                if (!_isInitialized)
                 {
-                    throw new InvalidOperationException("Network components not initialized");
+                    throw new InvalidOperationException("Network interface not initialized");
+                }
+
+                // Create a host object
+                var host = new Host(new IpV4Address(ipAddress), new MacAddress(macAddress));
+
+                // Check if host exists in known hosts
+                string key = $"{ipAddress}_{macAddress}";
+                if (_knownHosts.ContainsKey(key))
+                {
+                    host = _knownHosts[key];
                 }
 
                 // Remove from spoofer and limiter
                 _hostSpoofer.Remove(host);
                 _hostLimiter.Remove(host);
+
                 return true;
             }
             catch (Exception ex)
@@ -174,6 +234,20 @@ namespace EvilLimiter.Windows.API
         {
             try
             {
+                // First, cancel any ongoing scan
+                lock (_scannerLock)
+                {
+                    if (_currentScanner != null && _currentScanner.IsScanning)
+                    {
+                        _currentScanner.Cancel();
+                        Thread.Sleep(1000); // Give time for the scan to stop
+                    }
+                    _currentScanner = null;
+                }
+
+                _isInitialized = false;
+
+                // Stop spoofer and limiter first
                 if (_hostSpoofer != null)
                 {
                     _hostSpoofer.Stop();
@@ -186,6 +260,10 @@ namespace EvilLimiter.Windows.API
                     _hostLimiter = null;
                 }
 
+                // Wait a bit to ensure all operations are stopped
+                Thread.Sleep(500);
+
+                // Now dispose of network resources
                 if (_currentNetworkInfo != null)
                 {
                     if (_currentNetworkInfo.WinDivertHandle != IntPtr.Zero)
@@ -195,11 +273,15 @@ namespace EvilLimiter.Windows.API
 
                     if (_currentNetworkInfo.Communicator != null)
                     {
+                        _currentNetworkInfo.Communicator.Break(); // Break out of receive loop first
+                        Thread.Sleep(100);
                         _currentNetworkInfo.Communicator.Dispose();
                     }
 
                     _currentNetworkInfo = null;
                 }
+
+                _knownHosts.Clear();
             }
             catch (Exception ex)
             {

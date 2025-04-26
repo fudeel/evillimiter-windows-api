@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using WinDivertSharp;
@@ -144,78 +145,113 @@ namespace EvilLimiter.Windows.Networking
         {
             while (!token.IsCancellationRequested)
             {
-                var buffer = new WinDivertBuffer();
-                var address = new WinDivertAddress();
-                uint readLength = 0;
-
-                bool recvResult = WinDivert.WinDivertRecv(_networkInfo.WinDivertHandle, buffer, ref address, ref readLength);
-                if (!recvResult)
-                    throw new Exception("WinDivert failed to receive packet");
-                
-                var parseResult = WinDivert.WinDivertHelperParsePacket(buffer, readLength);
-                Host host = null;
-                ITokenBucket bucket = null;
-                WinDivertDirection? direction = null;
-
-                if (parseResult.IPv4Header != (IPv4Header*)0)
+                try
                 {
-                    lock (_ipHostDictLock) lock (_hostBucketDictLock)
-                    {
-                        if (_ipHostDict.TryGetValue(parseResult.IPv4Header->SrcAddr, out host))
-                        {
-                            bucket = _hostBucketDict[host].Item1;
-                            direction = WinDivertDirection.Outbound;
-                        }
-                        else if (_ipHostDict.TryGetValue(parseResult.IPv4Header->DstAddr, out host))
-                        {
-                            bucket = _hostBucketDict[host].Item2;
-                            direction = WinDivertDirection.Inbound;
-                        }
-                    }
+                    var buffer = new WinDivertBuffer();
+                    var address = new WinDivertAddress();
+                    uint readLength = 0;
 
-                    if (host != null &&
-                        (host.LimitRule.IsBlocked ||
-                         (direction == WinDivertDirection.Outbound && host.LimitRule.IsUploadBlocked) ||
-                         (direction == WinDivertDirection.Inbound && host.LimitRule.IsDownloadBlocked)))
+                    // Check if we should exit before trying to receive
+                    if (token.IsCancellationRequested)
+                        break;
+
+                    bool recvResult = WinDivert.WinDivertRecv(_networkInfo.WinDivertHandle, buffer, ref address, ref readLength);
+
+                    // Check if we should exit after receive
+                    if (token.IsCancellationRequested)
                     {
                         buffer.Dispose();
+                        break;
+                    }
+
+                    if (!recvResult)
+                    {
+                        // Handle the error gracefully
+                        int errorCode = Marshal.GetLastWin32Error();
+                        if (errorCode == 6) // Handle is invalid or closed
+                        {
+                            buffer.Dispose();
+                            break;
+                        }
+                        buffer.Dispose();
+                        Thread.Sleep(10);
                         continue;
                     }
 
-                    if (bucket != null)
+                    var parseResult = WinDivert.WinDivertHelperParsePacket(buffer, readLength);
+                    Host host = null;
+                    ITokenBucket bucket = null;
+                    WinDivertDirection? direction = null;
+
+                    if (parseResult.IPv4Header != (IPv4Header*)0)
                     {
-                        bool passed = false;
-
-                        try
-                        {
-                            passed = bucket.TryConsume(readLength * 8);
-                        }
-                        catch (ArgumentOutOfRangeException) { }
-
-                        if (passed)
-                        {
-                            switch (direction)
+                        lock (_ipHostDictLock) lock (_hostBucketDictLock)
                             {
-                            case WinDivertDirection.Outbound:
-                                lock (_bandwidthUploadDictLock)
-                                    _bandwidthUploadDict[host] += readLength * 8;
-                                break;
-                            case WinDivertDirection.Inbound:
-                                lock (_bandwidthDownloadDictLock)
-                                    _bandwidthDownloadDict[host] += readLength * 8;
-                                break;
+                                if (_ipHostDict.TryGetValue(parseResult.IPv4Header->SrcAddr, out host))
+                                {
+                                    bucket = _hostBucketDict[host].Item1;
+                                    direction = WinDivertDirection.Outbound;
+                                }
+                                else if (_ipHostDict.TryGetValue(parseResult.IPv4Header->DstAddr, out host))
+                                {
+                                    bucket = _hostBucketDict[host].Item2;
+                                    direction = WinDivertDirection.Inbound;
+                                }
                             }
-                        }
-                        else
+
+                        if (host != null &&
+                            (host.LimitRule.IsBlocked ||
+                             (direction == WinDivertDirection.Outbound && host.LimitRule.IsUploadBlocked) ||
+                             (direction == WinDivertDirection.Inbound && host.LimitRule.IsDownloadBlocked)))
                         {
                             buffer.Dispose();
                             continue;
                         }
-                    }
-                }
 
-                WinDivert.WinDivertSend(_networkInfo.WinDivertHandle, buffer, readLength, ref address);
-                buffer.Dispose();
+                        if (bucket != null)
+                        {
+                            bool passed = false;
+
+                            try
+                            {
+                                passed = bucket.TryConsume(readLength * 8);
+                            }
+                            catch (ArgumentOutOfRangeException) { }
+
+                            if (passed)
+                            {
+                                switch (direction)
+                                {
+                                    case WinDivertDirection.Outbound:
+                                        lock (_bandwidthUploadDictLock)
+                                            _bandwidthUploadDict[host] += readLength * 8;
+                                        break;
+                                    case WinDivertDirection.Inbound:
+                                        lock (_bandwidthDownloadDictLock)
+                                            _bandwidthDownloadDict[host] += readLength * 8;
+                                        break;
+                                }
+                            }
+                            else
+                            {
+                                buffer.Dispose();
+                                continue;
+                            }
+                        }
+                    }
+
+                    if (!token.IsCancellationRequested)
+                    {
+                        WinDivert.WinDivertSend(_networkInfo.WinDivertHandle, buffer, readLength, ref address);
+                    }
+
+                    buffer.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error in LimitLoop: {ex.Message}");
+                    Thread.Sleep(10);
+                }
             }
         }
 

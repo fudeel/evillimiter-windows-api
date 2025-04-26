@@ -152,6 +152,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="API\AggressiveHostScanner.cs" />
     <Compile Include="API\ApiServer.cs" />
     <Compile Include="API\NetworkManager.cs" />
     <Compile Include="Common\Globals.cs" />
