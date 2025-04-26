@@ -152,6 +152,8 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="API\ApiServer.cs" />
+    <Compile Include="API\NetworkManager.cs" />
     <Compile Include="Common\Globals.cs" />
     <Compile Include="Common\Config.cs" />
     <Compile Include="Controls\ListViewNF.cs">
