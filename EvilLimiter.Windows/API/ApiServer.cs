@@ -1,4 +1,5 @@
-﻿using System;
+﻿// EvilLimiter.Windows/API/ApiServer.cs
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -46,6 +47,8 @@ namespace EvilLimiter.Windows.API
             Console.WriteLine("POST /api/scan - Select interface and scan hosts");
             Console.WriteLine("POST /api/block - Block a host");
             Console.WriteLine("POST /api/unblock - Unblock a host");
+            Console.WriteLine("POST /api/limit - Limit a host's bandwidth");
+            Console.WriteLine("POST /api/unlimit - Remove bandwidth limits");
 
             Task.Run(() => HandleRequests());
             Console.WriteLine("Press Ctrl+C to exit...");
@@ -112,6 +115,14 @@ namespace EvilLimiter.Windows.API
                     case "/api/unblock":
                         if (method == "POST")
                             HandleUnblockHost(context);
+                        break;
+                    case "/api/limit":
+                        if (method == "POST")
+                            HandleLimitHost(context);
+                        break;
+                    case "/api/unlimit":
+                        if (method == "POST")
+                            HandleUnlimitHost(context);
                         break;
                     default:
                         SendResponse(context, 404, new { error = "Endpoint not found" });
@@ -294,6 +305,81 @@ namespace EvilLimiter.Windows.API
             if (success)
             {
                 Console.WriteLine($"Successfully unblocked host: {ipAddress}");
+            }
+
+            SendResponse(context, 200, new { success, ipAddress, macAddress });
+        }
+
+        private void HandleLimitHost(HttpListenerContext context)
+        {
+            var requestData = ReadRequestBody(context);
+
+            if (!requestData.ContainsKey("ipAddress") || !requestData.ContainsKey("macAddress"))
+            {
+                SendResponse(context, 400, new { error = "ipAddress and macAddress are required" });
+                return;
+            }
+
+            string ipAddress = requestData["ipAddress"].ToString();
+            string macAddress = requestData["macAddress"].ToString();
+
+            // Parse optional bandwidth parameters
+            double? uploadRate = null;
+            string uploadUnit = null;
+            double? uploadBurst = null;
+            double? downloadRate = null;
+            string downloadUnit = null;
+            double? downloadBurst = null;
+
+            if (requestData.ContainsKey("uploadRate"))
+                uploadRate = Convert.ToDouble(requestData["uploadRate"]);
+            if (requestData.ContainsKey("uploadUnit"))
+                uploadUnit = requestData["uploadUnit"].ToString();
+            if (requestData.ContainsKey("uploadBurst"))
+                uploadBurst = Convert.ToDouble(requestData["uploadBurst"]);
+            if (requestData.ContainsKey("downloadRate"))
+                downloadRate = Convert.ToDouble(requestData["downloadRate"]);
+            if (requestData.ContainsKey("downloadUnit"))
+                downloadUnit = requestData["downloadUnit"].ToString();
+            if (requestData.ContainsKey("downloadBurst"))
+                downloadBurst = Convert.ToDouble(requestData["downloadBurst"]);
+
+            Console.WriteLine($"Attempting to limit host: {ipAddress} ({macAddress})");
+            Console.WriteLine($"Upload: {uploadRate} {uploadUnit} (burst: {uploadBurst})");
+            Console.WriteLine($"Download: {downloadRate} {downloadUnit} (burst: {downloadBurst})");
+
+            bool success = _networkManager.LimitHost(ipAddress, macAddress,
+                uploadRate, uploadUnit, uploadBurst,
+                downloadRate, downloadUnit, downloadBurst);
+
+            if (success)
+            {
+                Console.WriteLine($"Successfully limited host: {ipAddress}");
+            }
+
+            SendResponse(context, 200, new { success, ipAddress, macAddress });
+        }
+
+        private void HandleUnlimitHost(HttpListenerContext context)
+        {
+            var requestData = ReadRequestBody(context);
+
+            if (!requestData.ContainsKey("ipAddress") || !requestData.ContainsKey("macAddress"))
+            {
+                SendResponse(context, 400, new { error = "ipAddress and macAddress are required" });
+                return;
+            }
+
+            string ipAddress = requestData["ipAddress"].ToString();
+            string macAddress = requestData["macAddress"].ToString();
+
+            Console.WriteLine($"Attempting to unlimit host: {ipAddress} ({macAddress})");
+
+            bool success = _networkManager.UnlimitHost(ipAddress, macAddress);
+
+            if (success)
+            {
+                Console.WriteLine($"Successfully unlimited host: {ipAddress}");
             }
 
             SendResponse(context, 200, new { success, ipAddress, macAddress });

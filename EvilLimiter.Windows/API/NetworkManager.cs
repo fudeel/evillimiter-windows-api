@@ -1,4 +1,5 @@
-﻿using System;
+﻿// EvilLimiter.Windows/API/NetworkManager.cs
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Sockets;
@@ -47,10 +48,17 @@ namespace EvilLimiter.Windows.API
             if (_currentNetworkInfo != null)
             {
                 Dispose();
+                Thread.Sleep(500); // Ensure complete cleanup
             }
 
-            // Create new packet communicator
-            var communicator = device.Open(100, PacketDeviceOpenAttributes.Promiscuous, 1000);
+            // Create new packet communicator with better settings
+            var communicator = device.Open(
+                65536,                                  // Larger buffer
+                PacketDeviceOpenAttributes.Promiscuous, // Promiscuous mode
+                1000);                                  // 1 second timeout
+
+            // Set the filter to only receive ARP packets
+            communicator.SetFilter("arp");
 
             // Get interface information
             var interfaceAddress = ((IpV4SocketAddress)address.Address).Address;
@@ -78,8 +86,9 @@ namespace EvilLimiter.Windows.API
             // Get subnet range
             var subnetRange = NetworkUtilities.GetIpRange($"{interfaceAddress}/{netmask}");
 
-            // Create WinDivert handle
+            // Create WinDivert handle using available flags
             var winDivertHandle = WinDivert.WinDivertOpen("true", WinDivertLayer.Forward, 0, WinDivertOpenFlags.None);
+
             if (winDivertHandle == new IntPtr(-1))
             {
                 throw new Exception($"WinDivert handle could not be opened. Error Code: {Marshal.GetLastWin32Error()}");
@@ -97,12 +106,17 @@ namespace EvilLimiter.Windows.API
                 WinDivertHandle = winDivertHandle
             };
 
-            // Initialize components
+            // Initialize components with proper timing
             _hostSpoofer = new HostSpoofer(_currentNetworkInfo);
-            _hostSpoofer.Start();
-
             _hostLimiter = new HostLimiter(_currentNetworkInfo);
+
+            // Start spoofer first
+            _hostSpoofer.Start();
+            Thread.Sleep(500); // Give time to initialize
+
+            // Then start limiter
             _hostLimiter.Start();
+            Thread.Sleep(500); // Give time to initialize
 
             _isInitialized = true;
             return _currentNetworkInfo;
@@ -226,6 +240,121 @@ namespace EvilLimiter.Windows.API
             catch (Exception ex)
             {
                 Console.WriteLine($"Error unblocking host: {ex.Message}");
+                return false;
+            }
+        }
+
+        public bool LimitHost(string ipAddress, string macAddress,
+    double? uploadRate, string uploadUnit, double? uploadBurst,
+    double? downloadRate, string downloadUnit, double? downloadBurst)
+        {
+            try
+            {
+                if (!_isInitialized)
+                {
+                    throw new InvalidOperationException("Network interface not initialized");
+                }
+
+                // Find or create host
+                var host = new Host(new IpV4Address(ipAddress), new MacAddress(macAddress));
+
+                string key = $"{ipAddress}_{macAddress}";
+                if (_knownHosts.ContainsKey(key))
+                {
+                    host = _knownHosts[key];
+                }
+                else
+                {
+                    _knownHosts[key] = host;
+                }
+
+                // Parse units
+                BitByteUnit uploadUnitEnum = string.IsNullOrEmpty(uploadUnit) ?
+                    BitByteUnit.KBit : (BitByteUnit)Enum.Parse(typeof(BitByteUnit), uploadUnit);
+                BitByteUnit downloadUnitEnum = string.IsNullOrEmpty(downloadUnit) ?
+                    BitByteUnit.KBit : (BitByteUnit)Enum.Parse(typeof(BitByteUnit), downloadUnit);
+
+                // Create limit rule
+                var rule = new LimitRule();
+
+                if (uploadRate.HasValue)
+                {
+                    rule.UploadRate = NetworkUtilities.BrokenDownRateToBitRate(uploadRate.Value, uploadUnitEnum);
+                    if (uploadBurst.HasValue)
+                    {
+                        rule.UploadBurst = NetworkUtilities.BrokenDownRateToBitRate(uploadBurst.Value, uploadUnitEnum);
+                    }
+                }
+
+                if (downloadRate.HasValue)
+                {
+                    rule.DownloadRate = NetworkUtilities.BrokenDownRateToBitRate(downloadRate.Value, downloadUnitEnum);
+                    if (downloadBurst.HasValue)
+                    {
+                        rule.DownloadBurst = NetworkUtilities.BrokenDownRateToBitRate(downloadBurst.Value, downloadUnitEnum);
+                    }
+                }
+
+                // Remove existing limits first
+                _hostLimiter.Remove(host);
+                _hostSpoofer.Remove(host);
+                Thread.Sleep(100);
+
+                // Apply the limit exactly like GUI
+                _hostSpoofer.Add(host);
+                Thread.Sleep(100); // Small delay between operations
+                _hostLimiter.Add(host, rule);
+
+                Console.WriteLine($"Applied limits to {ipAddress}:");
+                Console.WriteLine($"  Upload: {NetworkUtilities.FancyBitRate(rule.UploadRate)} (burst: {NetworkUtilities.FancyBitRate(rule.UploadBurst)})");
+                Console.WriteLine($"  Download: {NetworkUtilities.FancyBitRate(rule.DownloadRate)} (burst: {NetworkUtilities.FancyBitRate(rule.DownloadBurst)})");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error limiting host: {ex.Message}");
+                return false;
+            }
+        }
+
+        public bool UnlimitHost(string ipAddress, string macAddress)
+        {
+            try
+            {
+                if (!_isInitialized)
+                {
+                    throw new InvalidOperationException("Network interface not initialized");
+                }
+
+                // Find host
+                var host = new Host(new IpV4Address(ipAddress), new MacAddress(macAddress));
+
+                string key = $"{ipAddress}_{macAddress}";
+                if (_knownHosts.ContainsKey(key))
+                {
+                    host = _knownHosts[key];
+                }
+
+                // Remove limits in proper order
+                _hostLimiter.Remove(host);
+                Thread.Sleep(100);
+
+                try
+                {
+                    _hostSpoofer.Remove(host);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: Error during spoofer removal (this can be ignored): {ex.Message}");
+                }
+
+                Console.WriteLine($"Removed limits from {ipAddress}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error unlimiting host: {ex.Message}");
                 return false;
             }
         }
